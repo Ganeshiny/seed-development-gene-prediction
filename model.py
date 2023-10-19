@@ -18,6 +18,13 @@ import the data objects from the data script
 
 class GCNLayer(nn.Module):
 
+    '''
+    Here the input is:
+        final residue-level feature representation from the LSTM model
+        One hot encoded sequence
+        Structure - converted into 
+    '''
+
     def __init__(self, c_in, c_out):
         super().__init__()
         self.projection = nn.Linear(c_in, c_out)
