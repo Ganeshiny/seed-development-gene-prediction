@@ -27,6 +27,12 @@ def load_predicted_PDB(pdbfile):
 
     return distances, seqs[0]
 
+
+
+def  
+
+
+
 load_predicted_PDB("C:/Users/LENOVO/Desktop/seed-development-gene-prediction/1S3P-A.pdb")
 
 
