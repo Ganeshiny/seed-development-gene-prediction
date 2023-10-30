@@ -7,36 +7,37 @@ import os
 import util
 from Bio import SeqIO
 from Bio.PDB.PDBParser import PDBParser
+from Bio.Seq import Seq
+import Bio.Data.IUPACData
+from Bio.Data.IUPACData import extended_protein_letters
 from util import one_hot_encode_sequence
 
-# Load amino acid sequence data from FASTA file
-folder_path = "C:/Users/LENOVO/Desktop/seed-development-gene-prediction/data/sequences"
+def sequences_to_batch(folder_path):
+    # Load amino acid sequence data from FASTA file
+    #folder_path = "C:/Users/LENOVO/Desktop/seed-development-gene-prediction/data/sequences"
 
-# Assuming you have a list of amino acids
-amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
+    all_sequences = []
 
-all_sequences = []
+    # Iterate through each file in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".fasta") or filename.endswith(".fa"):
+            fasta_file = os.path.join(folder_path, filename)
+            sequences = []
+            for record in SeqIO.parse(fasta_file, "fasta"):
+                sequences.append(str(record.seq))
+            all_sequences.extend(sequences)
 
-# Iterate through each file in the folder
-for filename in os.listdir(folder_path):
-    if filename.endswith(".fasta") or filename.endswith(".fa"):
-        fasta_file = os.path.join(folder_path, filename)
-        sequences = []
-        for record in SeqIO.parse(fasta_file, "fasta"):
-            sequences.append(str(record.seq))
-        all_sequences.extend(sequences)
+    # One-hot encode sequences
+    one_hot_sequences = [one_hot_encode_sequence(seq, [*extended_protein_letters]) for seq in sequences]
 
-# One-hot encode sequences
-one_hot_sequences = [one_hot_encode_sequence(seq, amino_acids) for seq in sequences]
+    # Convert the one-hot encoded sequences to PyTorch tensors
+    data = torch.tensor(one_hot_sequences)
 
-# Convert the one-hot encoded sequences to PyTorch tensors
-data = torch.tensor(one_hot_sequences)
+    # Define the batch size
+    batch_size = 32
 
-# Define the batch size
-batch_size = 32
-
-# Create DataLoader for mini-batches
-data_loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=True)
+    # Create DataLoader for mini-batches
+    data_loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=True)
 
 # Training loop example (using the DataLoader)
 for i, batch in enumerate(data_loader):
@@ -56,7 +57,3 @@ if we use 32 but float its half the prcision
 whnen creatng a tensor
 
 '''
-
-
-
-
