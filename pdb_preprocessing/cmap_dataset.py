@@ -41,7 +41,7 @@ class CustomContactMapDataset(Dataset):
 
 '''Test zone'''
 # Contact Map directory path
-cmap_dir = "C:/Users/LENOVO/Desktop/seed-development-gene-prediction/pdb_preprocessing/contact_maps"
+cmap_dir = "../seed-development-gene-prediction/pdb_preprocessing/contact_maps"
 
 # Checking if files are loaded properly
 cmap_files = [f for f in os.listdir(cmap_dir) if f.endswith('.npy')]
