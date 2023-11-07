@@ -145,9 +145,9 @@ class PDB_Batch_Processor:
 
 
 
-PDB_gz_directory = "C:/Users/LENOVO/Desktop/seed-development-gene-prediction/pdb_preprocessing/pdb_train"
-output_PDB_directory = "C:/Users/LENOVO/Desktop/seed-development-gene-prediction/pdb_preprocessing/extracted_pdb_legacy_files"
-cmap_directory = "C:/Users/LENOVO/Desktop/seed-development-gene-prediction/pdb_preprocessing/contact_maps"
+PDB_gz_directory = "../seed-development-gene-prediction/pdb_preprocessing/pdb_train"
+output_PDB_directory = "../seed-development-gene-prediction/pdb_preprocessing/extracted_pdb_legacy_files"
+cmap_directory = "../seed-development-gene-prediction/pdb_preprocessing/contact_maps"
 extracted_PDB_files = PDB_Batch_Processor.extract_PDB_gz(PDB_gz_directory, output_PDB_directory)
 
 for PDB_file in extracted_PDB_files:
