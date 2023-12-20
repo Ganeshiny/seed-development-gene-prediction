@@ -4,7 +4,7 @@ from torch_geometric.nn import GraphConv, global_mean_pool
 from torch_geometric.data import DataLoader
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
-from preprocessing.pydataset3 import PDB_Dataset, pdb_dataset
+from preprocessing.pdbDataset import PDB_Dataset, pdb_dataset
 import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
