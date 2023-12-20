@@ -1,18 +1,12 @@
-import csv
+from torch_geometric.data import Dataset, Data, Batch
+from torch_geometric.loader import DataLoader
+from tqdm import tqdm
 import os
-import argparse
+import csv
 import numpy as np
+import scipy.sparse as sp
 import torch
-from torch.utils.data import Dataset, DataLoader
-import multiprocessing
-
-#DO THE MULTIPROCESSING HERE!
-
-
-'''
-This is a fucntion to one hot encode the sequence
-
-'''
+import torch_geometric.transforms as T
 
 def seq2onehot(seq):
     """Create 26-dim embedding"""
@@ -31,148 +25,153 @@ def seq2onehot(seq):
 
     return seqs_x
 
-'''
-Loads the nrPDB-GO-train - list of sequences with the pdb id and the chain index
-'''
-def load_list(fname):
-    pdb_chain_list = []
-    with open(fname, 'r') as fRead:
-        for line in fRead:
-            pdb_chain_list.append(line.strip())
-    return pdb_chain_list
-
-
-'''
-Loads the GO annot file with the .tsv extension
-'''
-
-def load_GO_annot(filename):
-    onts = ['molecular_function', 'biological_process', 'cellular_component']
-    prot2annot = {}
-    goterms = {ont: [] for ont in onts}
-    gonames = {ont: [] for ont in onts}
-    with open(filename, mode='r') as tsvfile:
-        reader = csv.reader(tsvfile, delimiter='\t')
-
-        # molecular function
-        next(reader, None)  # skip the headers
-        goterms[onts[0]] = next(reader)
-        next(reader, None)  # skip the headers
-        gonames[onts[0]] = next(reader)
-
-        # biological process
-        next(reader, None)  # skip the headers
-        goterms[onts[1]] = next(reader)
-        next(reader, None)  # skip the headers
-        gonames[onts[1]] = next(reader)
-
-        # cellular component
-        next(reader, None)  # skip the headers
-        goterms[onts[2]] = next(reader)
-        next(reader, None)  # skip the headers
-        gonames[onts[2]] = next(reader)
-
-        next(reader, None)  # skip the headers
-        for row in reader:
-            prot, prot_goterms = row[0], row[1:]
-            prot2annot[prot] = {ont: [] for ont in onts}
-            for i in range(3):
-                goterm_indices = [goterms[onts[i]].index(goterm) for goterm in prot_goterms[i].split(',') if
-                                  goterm != '']
-                prot2annot[prot][onts[i]] = np.zeros(len(goterms[onts[i]]), dtype=np.int64)
-                prot2annot[prot][onts[i]][goterm_indices] = 1.0
-    return prot2annot, goterms, gonames
-
-
-'''
-Dataset class using pytorch
-'''
-class MyDataset(Dataset):
-    def __init__(self, prot_list, prot2annot, npz_dir):
-        self.prot_list = prot_list 
-        self.prot2annot = prot2annot 
-        self.npz_dir = npz_dir
+class PDB_Dataset(Dataset):
+    def __init__(self, root, annot_file, num_shards=20, transform=None, pre_transform=None):
+        annot_data = self.annot_file_reader(annot_file)
+        self.prot2annot = annot_data[0]
+        self.prot_list = [prot_id for prot_id in annot_data[3] if os.path.exists(os.path.join(root, f'{prot_id}.npz'))]
+        self.npz_dir = root
         self.num_shards = num_shards
-        self.indices = indices
+        super(PDB_Dataset, self).__init__(root, transform, pre_transform)
+            
+    def annot_file_reader(self, annot_filename):
+        onts = ['molecular_function', 'biological_process', 'cellular_component']
+        prot2annot = {}
+        goterms = {ont: [] for ont in onts}
+        gonames = {ont: [] for ont in onts}
+        prot_list = []
+        with open(annot_filename, mode='r') as tsvfile:
+            reader = csv.reader(tsvfile, delimiter='\t')
 
-    def __len__(self):
-        return len(self.prot_list) #The number of IDs we are using to train/test
+            # molecular function
+            next(reader, None)  # skip the headers
+            goterms[onts[0]] = next(reader)
+            next(reader, None)  # skip the headers
+            gonames[onts[0]] = next(reader)
 
-    def _serialize_example(self, prot_id, sequence, ca_dist_matrix, cb_dist_matrix):
-        #print(self.prot2annot[0][prot_id])
-        labels = torch.from_numpy(self.prot2annot[0][prot_id]['molecular_function']).long()
-        labels = torch.from_numpy(self.prot2annot[0][prot_id]['biological_process']).long()
-        labels = torch.from_numpy(self.prot2annot[0][prot_id]['cellular_component']).long()
-        d_feature = {
-            'prot_id': prot_id.encode(),
-            'seq_1hot': torch.from_numpy(seq2onehot(sequence).reshape(-1)).float(),
-            'L': torch.tensor(len(sequence)),
-        }
-        
-        d_feature['mf_labels'] = labels[:len(labels)//3]
-        d_feature['bp_labels'] = labels[len(labels)//3:2*(len(labels)//3)]
-        d_feature['cc_labels'] = labels[2*(len(labels)//3):]
+            # biological process
+            next(reader, None)  # skip the headers
+            goterms[onts[1]] = next(reader)
+            next(reader, None)  # skip the headers
+            gonames[onts[1]] = next(reader)
 
-        d_feature['ca_dist_matrix'] = torch.from_numpy(ca_dist_matrix.reshape(-1)).float()
-        d_feature['cb_dist_matrix'] = torch.from_numpy(cb_dist_matrix.reshape(-1)).float()
-        return d_feature
+            # cellular component
+            next(reader, None)  # skip the headers
+            goterms[onts[2]] = next(reader)
+            next(reader, None)  # skip the headers
+            gonames[onts[2]] = next(reader)
 
-    def __getitem__(self, idx):
-        prot = self.prot_list[idx]
-        #print(self.prot_list)
-        pdb_file = os.path.normpath(os.path.join(self.npz_dir, f'{prot}.npz'))
+            next(reader, None)  # skip the headers
+            for row in reader:
+                prot, prot_goterms = row[0], row[1:]
+                prot2annot[prot] = {ont: [] for ont in onts}
+                for i in range(3):
+                    goterm_indices = [goterms[onts[i]].index(goterm) for goterm in prot_goterms[i].split(',') if
+                                    goterm != '']
+                    prot2annot[prot][onts[i]] = np.zeros(len(goterms[onts[i]]), dtype=np.int64)
+                    prot2annot[prot][onts[i]][goterm_indices] = 1.0
+                prot_list.append(prot)
+        return prot2annot, goterms, gonames, prot_list
+
+    @property
+    def processed_file_names(self):
+        return [f'data_{i}.pt' for i in range(len(self.prot_list))]
+
+    def process(self):
+        data_list = []
+        for index, prot_id in tqdm(enumerate(self.prot_list), total=len(self.prot_list)):
+            data = self._load_data(prot_id, self.prot2annot)
+
+            if data is not None:
+                data_list.append(data)
+                torch.save(data, os.path.join(self.processed_dir, f'data_{index}.pt'))
+
+        return data_list
+
+    def _load_data(self, prot_id, prot2annot):
+        pdb_file = os.path.join(self.npz_dir, f'{prot_id}.npz')
+
         if os.path.isfile(pdb_file):
             cmap = np.load(pdb_file)
             sequence = str(cmap['seqres'])
             ca_dist_matrix = cmap['C_alpha']
             cb_dist_matrix = cmap['C_beta']
-            #print(f"The dict im trying to print: {self.prot2annot}")
-            
-            example = self._serialize_example(prot, sequence, ca_dist_matrix, cb_dist_matrix)
-            return example
+
+            node_features = torch.tensor(seq2onehot(sequence), dtype=torch.float)
+            adjacency_info = self._get_adjacency_info(ca_dist_matrix)
+            pdb_id = torch.tensor([ord(c) for c in prot_id], dtype=torch.long)
+            length = torch.tensor(len(sequence), dtype=torch.long)
+            labels = self._get_labels(prot_id, prot2annot)
+            data = Data(
+                x=node_features,
+                edge_index=adjacency_info,
+                u=pdb_id,
+                y=labels,
+                length=length
+            )
+
+            return data
         else:
-            print(pdb_file)
+            print(f"File not found: {pdb_file}")
             return None
 
-def serialize_dataset(args, idx):
-    pt_file = f'{args.serial_prefix}_{idx:0>2d}-of-{args.num_shards:0>2d}.pt'
-    print(f"### Serializing {len(args.prot_list)} examples into {pt_file}")
+    def _get_labels(self, prot_id, prot2annot):
+        mf_labels = torch.tensor(prot2annot[prot_id]['molecular_function'], dtype=torch.long)
+        bp_labels = torch.tensor(prot2annot[prot_id]['biological_process'], dtype=torch.long)
+        cc_labels = torch.tensor(prot2annot[prot_id]['cellular_component'], dtype=torch.long)
 
-    tmp_prot_list = args.prot_list[args.indices[idx][0]:args.indices[idx][1]]
-    dataset = MyDataset(tmp_prot_list, load_GO_annot(args.annot), args.npz_dir)
+        # Check for empty tensors and handle individually
+        if mf_labels.numel() == 0:
+            mf_labels = torch.zeros(1, dtype=torch.long)
+        if bp_labels.numel() == 0:
+            bp_labels = torch.zeros(1, dtype=torch.long)
+        if cc_labels.numel() == 0:
+            cc_labels = torch.zeros(1, dtype=torch.long)
+
+        return {
+            'molecular_function': mf_labels,
+            'biological_process': bp_labels,
+            'cellular_component': cc_labels
+        }
+
+    def _get_adjacency_info(self, distance_matrix, threshold=8.0):
+        adjacency_matrix = np.where(distance_matrix <= threshold, 1, 0)
+        np.fill_diagonal(adjacency_matrix, 0)  # Ensure no self-loops
+        edge_indices = np.nonzero(adjacency_matrix)
+
+        coo_matrix = sp.coo_matrix((np.ones_like(edge_indices[0]), (edge_indices[0], edge_indices[1])))
+        return torch.tensor([coo_matrix.row, coo_matrix.col], dtype=torch.long)
+
+    def len(self):
+        return len(self.prot_list)
+    
+    def get(self, idx): # cannot return none
+        prot_id = self.prot_list[idx]
+        data = self._load_data(prot_id, self.prot2annot)
+        return data
+        
+    def print_batch_details(self, batch):
+        print("Batch Details:")
+        print("Number of Graphs in Batch:", batch.num_graphs)
+        print("Number of Nodes:", batch.num_nodes)
+        print("Number of Edges:", batch.num_edges)
+        print("Node Features Shape:", batch.x.shape)
+        print("Edge Index Shape:", batch.edge_index.shape)
+
+'''    @property
+    def raw_file_names(self):
+        raw_file_names = []
+        for id in self.prot_list:
+            raw_file_names.append(os.path.join(self.npz_dir, f'{id}.npz'))
+        print(f'DEBUG : {raw_file_names}')
+        return raw_file_names'''
 
 
-    torch.save(dataset, pt_file)
-    print(f"Writing {pt_file} done!")
+root = 'preprocessing/data/annot_pdb_chains_npz'
+annot_file = 'preprocessing/data/nrPDB-GO_annot.tsv'
+num_shards = 20
+pdb_dataset = PDB_Dataset(root, annot_file, num_shards=num_shards)
 
+dataset = PDB_Dataset(root, annot_file, num_shards=num_shards)
+data_list = [dataset[i] for i in range(len(dataset))]
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-annot', type=str, default='./data/nrPDB-GO_annot.tsv',
-                        help="Input file (*.tsv) with preprocessed annotations.")
-    parser.add_argument('-prot_list', type=str, default='./data/nrPDB-GO_train.txt',
-                        help="Input file (*.txt) with a set of protein IDs with distMAps in npz_dir.")
-    parser.add_argument('-npz_dir', type=str, default='./data/annot_pdb_chains_npz')
-    parser.add_argument('-serial_prefix', type=str, default= 'serialized_data')
-    parser.add_argument('-num_shards', type=int, default=20, help="Number of pytorch files per protein set.")
-
-    args = parser.parse_args()
-
-    # Load protein list and annotations
-    prot_list = load_list(args.prot_list)
-    prot2annot, _, _ = load_GO_annot(args.annot)
-
-
-    # Number of shards for serialization
-    num_shards = 20
-    shard_size = len(prot_list) // num_shards
-    indices = [(i * shard_size, (i + 1) * shard_size) for i in range(0, num_shards)]
-    indices[-1] = (indices[-1][0], len(prot_list))
-
-    # Save indices for later use
-    args.indices = indices
-    args.prot_list = prot_list
-
-    # Serialize datasets
-    for idx in range(num_shards):
-        serialize_dataset(args, idx)
