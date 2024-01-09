@@ -1,78 +1,68 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
+import numpy as np
 from torch_geometric.nn import GCNConv, global_mean_pool
-from torch_geometric.data import Data, Dataset, DataLoader
+from torch_geometric.data import DataLoader
 from sklearn.metrics import accuracy_score
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from preprocessing.pydataset3 import PDB_Dataset
-import torch.nn.functional as F
-
+import matplotlib.pyplot as plt
+from preprocessing.pydataset3 import PDB_Dataset  # Make sure to import your dataset module
+from torch.nn.functional import binary_cross_entropy_with_logits as BCEWithLogitsLoss
 
 class CustomMultilabelLoss(nn.Module):
-    def __init__(self, lambda_reg=0.001):
+    def __init__(self):
         super(CustomMultilabelLoss, self).__init__()
-        self.lambda_reg = lambda_reg
 
-    def forward(self, predictions, targets, model):
+    def forward(self, predictions, targets):
         # Assuming predictions and targets are dictionaries
-        loss = 0.0
+        loss = {}
 
         for ontology, prediction in predictions.items():
-            target_size = targets[ontology].size(-1)
-            prediction = prediction.view(-1, target_size)
-            target = targets[ontology].float().view(-1, target_size)
+            # Assuming BCELoss for each ontology
+            # Ensure both prediction and target are 1D tensors
+            bce_loss = nn.BCEWithLogitsLoss()(prediction.view(-1), targets[ontology].float().view(-1))
+            loss[ontology] = bce_loss
 
-            # Calculate weighted BCE loss for each sample in the batch
-            weighted_bce_loss = F.binary_cross_entropy_with_logits(prediction, target, reduction='sum')
+        # Calculate 'total' loss
+        loss['total'] = sum(loss.values())
 
-            # L2 regularization on model parameters
-            l2_reg = torch.sum(torch.stack([torch.norm(param, p=2) for param in model.parameters()]))
-
-            # Add L2 regularization term to the loss
-            total_loss = weighted_bce_loss + self.lambda_reg * l2_reg
-
-            # Accumulate the loss
-            loss += total_loss
-
-        # Calculate the average loss over all samples in the batch
-        average_loss = loss / len(predictions)
-
-        return average_loss
+        return loss
 
 class GCNMultiLabelClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, output_sizes_dict, dropout_rate=0.5):
+    def __init__(self, input_size, hidden_size, output_sizes_dict):
         super(GCNMultiLabelClassifier, self).__init__()
-
-        # Define GCN layers
+        
+        # Initializing GCN layers
         self.conv1 = GCNConv(input_size, hidden_size)
         self.conv2 = GCNConv(hidden_size, hidden_size)
 
-        # Output layers for each ontology
+        # Output layers for each ontology, ModuleDict holds submodules in a dictionary.
+        # Here the submodules are the Linear output layers for each ontology
         self.output_layers = nn.ModuleDict({
             ontology: nn.Linear(hidden_size, output_size) for ontology, output_size in output_sizes_dict.items()
         })
 
-        # Dropout layer
-        self.dropout = nn.Dropout(dropout_rate)
+        # Dropout layers
+        self.dropout_input = nn.Dropout(0.8)
+        self.dropout_hidden = nn.Dropout(0.3)
 
     def forward(self, x, edge_index, batch):
         # First GCN layer
         x = torch.relu(self.conv1(x, edge_index))
-        x = self.dropout(x)
+        x = self.dropout_input(x)
 
         # Second GCN layer
         x = torch.relu(self.conv2(x, edge_index))
-        x = self.dropout(x)
+        x = self.dropout_hidden(x)
 
-        # Aggregation step (choose one of the following)
+        # Aggregation step
         x = global_mean_pool(x, batch)  # or global_add_pool or global_max_pool
 
         # Output layers for each ontology
         outputs = {ontology: self.output_layers[ontology](x) for ontology in self.output_layers.keys()}
         return outputs
-
 
 # Set up the dataset
 root = 'preprocessing/data/annot_pdb_chains_npz'
@@ -91,139 +81,116 @@ train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-# Initialize the model
+# Initialize the model, criterion, and optimizer
 input_size = len(dataset[0].x[0])
-hidden_size = 64
-output_sizes_dict = {'molecular_function': len(dataset[0].y['molecular_function']),
-                     'biological_process': len(dataset[0].y['biological_process']),
-                     'cellular_component': len(dataset[0].y['cellular_component'])}
+hidden_size = 4
+output_sizes_dict = {
+    'molecular_function': len(dataset[0].y['molecular_function']),
+    'biological_process': len(dataset[0].y['biological_process']),
+    'cellular_component': len(dataset[0].y['cellular_component'])
+}
 
 model = GCNMultiLabelClassifier(input_size, hidden_size, output_sizes_dict)
-
-# Choose device (cuda or cpu)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
 
-# Set up optimizer, scheduler, and criterion
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+criterion = CustomMultilabelLoss() 
+optimizer = optim.Adam(model.parameters(), lr=0.0005)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
-criterion = CustomMultilabelLoss()
 
 # Training loop
-num_epochs = 10
+num_epochs = 50
 train_losses = []
 val_accuracies = {ontology: [] for ontology in output_sizes_dict.keys()}
 test_accuracies = {ontology: [] for ontology in output_sizes_dict.keys()}
 
 for epoch in range(num_epochs):
+    # Training
     model.train()
-    total_loss = 0.0
+    total_train_loss = 0.0
 
-    for data in tqdm(train_loader, desc=f'Epoch {epoch + 1}'):
+    for data in tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs} - Training'):
         data = data.to(device)
         optimizer.zero_grad()
-        output = model(data.x, data.edge_index, data.batch)
-        output_flattened = {ontology: torch.flatten(output[ontology]).to(device) for ontology in output.keys()}
-        print(f"output: {output_flattened['molecular_function'].shape}") #torch.Size([64, 981])
-
-        # Assuming data.y is a dictionary of labels
-        targets = {ontology: data.y[ontology].to(device) for ontology in output.keys()}
-        print(f"targets: {targets['molecular_function'].shape}") #torch.Size([62784])
-
-        loss = criterion(output_flattened, targets, model)
-        loss.backward()
+        outputs = model(data.x, data.edge_index, data.batch)
+        targets = {ontology: data.y[ontology] for ontology in output_sizes_dict.keys()}
+        loss = criterion(outputs, targets)
+        loss['total'].backward()
         optimizer.step()
-        total_loss += loss.item()
+        total_train_loss += loss['total'].item()
 
-    train_losses.append(total_loss / len(train_loader))
+    avg_train_loss = total_train_loss / len(train_loader)
+    train_losses.append(avg_train_loss)
 
     # Validation
     model.eval()
-    y_true_val, y_pred_val = {ontology: [] for ontology in output.keys()}, {ontology: [] for ontology in output.keys()}
+    all_val_preds = {ontology: [] for ontology in output_sizes_dict.keys()}
+    all_val_labels = {ontology: [] for ontology in output_sizes_dict.keys()}
 
     with torch.no_grad():
-        for data in tqdm(val_loader, desc=f'Epoch {epoch + 1} - Validating'):
+        for data in tqdm(val_loader, desc=f'Epoch {epoch + 1}/{num_epochs} - Validation'):
             data = data.to(device)
-            output = model(data.x, data.edge_index, data.batch)
-            output_flattened = {ontology: torch.flatten(output[ontology]).to(device) for ontology in output.keys()}
+            outputs = model(data.x, data.edge_index, data.batch)
 
-            targets = {ontology: data.y[ontology].unsqueeze(0).to(device) for ontology in output.keys()}
-            predictions = {ontology: (output_flattened[ontology] > 0.5).cpu().numpy().flatten() for ontology in output.keys()}
+            for ontology in output_sizes_dict.keys():
+                all_val_preds[ontology].extend(torch.sigmoid(outputs[ontology].view(-1)).cpu())
+                all_val_labels[ontology].extend(data.y[ontology].cpu())
 
-            for ontology in output_flattened.keys():
-                y_true_val[ontology].extend(targets[ontology].squeeze().cpu().numpy().flatten())
-                y_pred_val[ontology].extend(predictions[ontology])
-
-        # Calculate accuracy on validation set
-        accuracy_val = {ontology: accuracy_score(y_true_val[ontology], y_pred_val[ontology]) for ontology in y_true_val.keys()}
-        for ontology in val_accuracies.keys():
-            val_accuracies[ontology].append(accuracy_val[ontology])
-
-        # Print the calculated accuracies on the validation set
-        print("Validation Accuracies:")
-        for ontology, acc in accuracy_val.items():
-            print(f"{ontology}: {acc}")
+    for ontology in output_sizes_dict.keys():
+        val_accuracy = accuracy_score(torch.vstack(all_val_labels[ontology]),
+                                       (torch.vstack(all_val_preds[ontology]) > 0.5).int())
+        val_accuracies[ontology].append(val_accuracy.item())
 
     # Testing
-    y_true_test, y_pred_test = {ontology: [] for ontology in output.keys()}, {ontology: [] for ontology in output.keys()}
+    model.eval()
+    all_test_preds = {ontology: [] for ontology in output_sizes_dict.keys()}
+    all_test_labels = {ontology: [] for ontology in output_sizes_dict.keys()}
 
     with torch.no_grad():
-        for data in tqdm(test_loader, desc=f'Epoch {epoch + 1} - Testing'):
+        for data in tqdm(test_loader, desc=f'Epoch {epoch + 1}/{num_epochs} - Testing'):
             data = data.to(device)
-            output = model(data.x, data.edge_index, data.batch)
+            outputs = model(data.x, data.edge_index, data.batch)
 
-            targets = {ontology: data.y[ontology].unsqueeze(0).to(device) for ontology in output.keys()}
-            predictions = {ontology: (output[ontology] > 0.5).cpu().numpy().flatten() for ontology in output.keys()}
+            for ontology in output_sizes_dict.keys():
+                all_test_preds[ontology].extend(torch.sigmoid(outputs[ontology].view(-1)).cpu())
+                all_test_labels[ontology].extend(data.y[ontology].cpu())
 
-            for ontology in output.keys():
-                y_true_test[ontology].extend(targets[ontology].squeeze().cpu().numpy().flatten())
-                y_pred_test[ontology].extend(predictions[ontology])
+    for ontology in output_sizes_dict.keys():
+        test_accuracy = accuracy_score(torch.vstack(all_test_labels[ontology]),
+                                        (torch.vstack(all_test_preds[ontology]) > 0.5).int())
+        test_accuracies[ontology].append(test_accuracy.item())
 
-        # Calculate accuracy on test set
-        accuracy_test = {ontology: accuracy_score(y_true_test[ontology], y_pred_test[ontology]) for ontology in y_true_test.keys()}
-        for ontology in test_accuracies.keys():
-            test_accuracies[ontology].append(accuracy_test[ontology])
+    print(f'Epoch {epoch + 1}/{num_epochs} - '
+          f'Training Loss: {avg_train_loss:.4f}, '
+          f'Validation Accuracy: {val_accuracy:.4f}, '
+          f'Test Accuracy: {test_accuracy:.4f}')
 
-        # Print the calculated accuracies on the test set
-        print("Test Accuracies:")
-        for ontology, acc in accuracy_test.items():
-            print(f"{ontology}: {acc}")
+def plot_metrics(train_losses, val_accuracies, test_accuracies, epochs):
+    plt.figure(figsize=(12, 5))
 
-    # Adjust the learning rate
-    scheduler.step()
+    # Plotting Training Loss
+    plt.subplot(1, 2, 1)
+    plt.plot(range(1, epochs + 1), train_losses, label='Training Loss', marker='o')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training Loss over Epochs')
+    plt.legend()
 
-# Plotting
-epochs = range(1, num_epochs + 1)
+    # Plotting Validation Accuracy
+    plt.subplot(1, 2, 2)
+    for ontology, val_accuracy in val_accuracies.items():
+        plt.plot(range(1, epochs + 1), val_accuracy, label=f'Validation {ontology} Accuracy', marker='o')
 
-plt.figure(figsize=(18, 6))
+    for ontology, test_accuracy in test_accuracies.items():
+        plt.plot(range(1, epochs + 1), test_accuracy, label=f'Test {ontology} Accuracy', marker='o')
 
-# Plotting Training Loss
-plt.subplot(1, 3, 1)
-plt.plot(epochs, train_losses, label='Train Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training Loss over Epochs')
-plt.legend()
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Validation and Test Accuracies over Epochs')
+    plt.legend()
 
-# Plotting Validation Accuracies
-plt.subplot(1, 3, 2)
-for ontology in val_accuracies.keys():
-    plt.plot(epochs, val_accuracies[ontology], label=f'Validation Accuracy ({ontology})')
+    plt.tight_layout()
+    plt.show()
 
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.title('Validation Accuracy over Epochs')
-plt.legend()
-
-# Plotting Test Accuracies
-plt.subplot(1, 3, 3)
-for ontology in test_accuracies.keys():
-    plt.plot(epochs, test_accuracies[ontology], label=f'Test Accuracy ({ontology})')
-
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.title('Test Accuracy over Epochs')
-plt.legend()
-
-plt.tight_layout()
-plt.show()
+# Usage:
+plot_metrics(train_losses, val_accuracies, test_accuracies, num_epochs)
