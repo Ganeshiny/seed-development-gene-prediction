@@ -1,9 +1,7 @@
-from Bio import SeqIO
-from Bio.Seq import Seq
-#from Bio.Data.IUPACData import protein_letters
 from Bio.Data.PDBData import protein_letters_3to1_extended
 from Bio.SeqRecord import SeqRecord
-
+from Bio.Seq import Seq
+from Bio import SeqIO
 import networkx as nx
 import numpy as np
 import argparse
@@ -13,20 +11,22 @@ import gzip
 import csv
 
 
-# ## packages (dependencies):
-# networkx, obonet, csv, biopython
-
 # ## input data:
 # go-basic.obo (from: http://geneontology.org/docs/download-ontology/)
 # pdb_chain_go.tsv (from: https://www.ebi.ac.uk/pdbe/docs/sifts/quick.html)
-# bc-95.out (from: ftp://resources.rcsb.org/sequence/clusters/)
+# cluster_data (from: ftp://resources.rcsb.org/sequence/clusters/)
 
 exp_evidence_codes = set(['EXP', 'IDA', 'IPI', 'IMP', 'IGI', 'IEP', 'TAS', 'IC', 'CURATED'])
 root_terms = set(['GO:0008150', 'GO:0003674', 'GO:0005575'])
 
-
-
 def read_fasta(fn_fasta):
+    '''
+    Out: a dictionary of protein ID as keys and fasta sequence as values
+
+    Notes: 
+    The key value is a PDB entry, not an entity. This is a 4 letter ID, in uppercase
+    The sequences are only read if they are >= 60aa and <= 1000 aa. Larger protein are not read.
+    '''
     aa = set(['R', 'X', 'S', 'G', 'W', 'I', 'Q', 'A', 'T', 'V', 'K', 'Y', 'C', 'N', 'L', 'F', 'D', 'M', 'P', 'H', 'E'])
     prot2seq = {}
     with gzip.open(fn_fasta, "rt") as handle:
@@ -42,7 +42,9 @@ def read_fasta(fn_fasta):
 
 
 def write_prot_list(protein_list, filename):
-    # write list of protein IDs
+    '''
+    Utility function that outputs a file with list of elements that are newline seprataed
+    '''
     fWrite = open(filename, 'w')
     for p in protein_list:
         fWrite.write("%s\n" % (p))
@@ -50,23 +52,33 @@ def write_prot_list(protein_list, filename):
 
 
 def write_fasta(fn, sequences):
-    # write fasta
+    '''
+    Takes in a list of sequences, writes in fasta format
+    '''
     with open(fn, "w") as output_handle:
         for sequence in sequences:
             SeqIO.write(sequence, output_handle, "fasta")
 
 
 def load_go_graph(fname):
-    # read *.obo file
-    go_graph = obonet.read_obo(open(fname, 'r'))
+    print("### Loading Gene Ontology (GO) graph...")
+    go_graph = obonet.read_obo(fname)
+    print(f"DEBUG: {go_graph}, and the number of nodes: {len(go_graph.nodes)}")
     return go_graph
 
-
 def load_pdbs(sifts_fname):
-    # read annotated PDB chains
+    '''
+    Reads the SIFTs annotation file 
+
+    Reads the first two columns of SIFTSs file, retrieve the PDB entry and entity identifiers, combine then to obtain set of PDB chains
+
+    Note:
+    PDB chains are all in uppercase.
+    Format: PDB Entry-Chain Identifer (Alphabet)
+    '''
     pdb_chains = set()
-    with gzip.open(sifts_fname, mode='rt') as tsvfile:
-        reader = csv.reader(tsvfile, delimiter='\t')
+    with gzip.open(sifts_fname, mode='rt') as csvfile:
+        reader = csv.reader(csvfile, delimiter=',')
         next(reader, None)  # skip the headers
         next(reader, None)  # skip the headers
         for row in reader:
@@ -75,49 +87,34 @@ def load_pdbs(sifts_fname):
             pdb_chains.add(pdb + '-' + chain)
     return pdb_chains
 
+def load_plant_ids(file_path):
+    with open(file_path, 'r') as file:
+        for line in file:
+            pdb_entries = set(line.strip().split(','))
+    print(pdb_entries)
+    return set(pdb_entries)
 
-def load_clusters(fname):
-    pdb2clust = {}  # (c_idx, rank)
-    c_ind = 1
-    fRead = open(fname, 'r')
-    for line in fRead:
-        clust = line.strip().split()
-        clust = [p.replace('_', '-') for p in clust]
-        for rank, p in enumerate(clust):
-            pdb2clust[p] = (c_ind, rank)
-        c_ind += 1
-    fRead.close()
-    return pdb2clust
-
-
-def nr_set(chains, pdb2clust):
-    clust2chain = {}
-    for chain in chains:
-        if chain in pdb2clust:
-            c_idx = pdb2clust[chain][0]
-            if c_idx not in clust2chain:
-                clust2chain[c_idx] = chain
-            else:
-                _chain = clust2chain[c_idx]
-                if pdb2clust[chain][1] < pdb2clust[_chain][1]:
-                    clust2chain[c_idx] = chain
-    return set(clust2chain.values())
-
-def read_sifts(fname, chains, go_graph):
+def read_sifts(fname, entries, go_graph):
+    '''
+    Inputs: 
+    fname: SIFTs annotation file path 
+    go_graph: graph object from reading the .obo file
+    '''
     print ("### Loading SIFTS annotations...")
     pdb2go = {}
     go2info = {}
+
     with gzip.open(fname, mode='rt') as tsvfile:
         reader = csv.reader(tsvfile, delimiter='\t')
         next(reader, None)  # skip the headers
         next(reader, None)  # skip the headers
         for row in reader:
             pdb = row[0].strip().upper()
-            chain = row[1].strip()
+            chain = row[1].strip() # an alphabet char
             evidence = row[4].strip()
             go_id = row[5].strip()
             pdb_chain = pdb + '-' + chain
-            if (pdb_chain in chains) and (go_id in go_graph) and (go_id not in root_terms):
+            if (pdb in entries) and (go_id in go_graph) and (go_id not in root_terms):
                 if pdb_chain not in pdb2go:
                     pdb2go[pdb_chain] = {'goterms': [go_id], 'evidence': [evidence]}
                 namespace = go_graph.nodes[go_id]['namespace']
@@ -134,9 +131,7 @@ def read_sifts(fname, chains, go_graph):
                         go2info[go]['pdb_chains'].add(pdb_chain)
     return pdb2go, go2info
 
-
 def write_output_files(fname, pdb2go, go2info, pdb2seq):
-    # select goterms (> 49, < 5000)
     onts = ['molecular_function', 'biological_process', 'cellular_component']
     selected_goterms = {ont: set() for ont in onts}
     selected_proteins = set()
@@ -144,21 +139,10 @@ def write_output_files(fname, pdb2go, go2info, pdb2seq):
         prots = go2info[goterm]['pdb_chains']
         num = len(prots)
         namespace = go2info[goterm]['ont']
-        if num > 49 and num <= 5000:
+        #print(f"Goterm: {goterm}, Num: {num}, Namespace: {namespace}")
+        if num > 0 and num <= 50000:
             selected_goterms[namespace].add(goterm)
             selected_proteins = selected_proteins.union(prots)
-    
-    for chain in pdb2go:
-        goterms = set(pdb2go[chain]['goterms'])
-        if len(goterms) > 2 and chain in pdb2seq:
-            for goterm in goterms:
-                prots = go2info[goterm]['pdb_chains']
-                num = len(prots)
-                namespace = go2info[goterm]['ont']
-                if num > 19 and num <= 5000:
-                    selected_goterms[namespace].add(goterm)
-                    selected_proteins = selected_proteins.union(prots)
-    
 
     selected_goterms_list = {ont: list(selected_goterms[ont]) for ont in onts}
     selected_gonames_list = {ont: [go2info[goterm]['goname'] for goterm in selected_goterms_list[ont]] for ont in onts}
@@ -194,6 +178,7 @@ def write_output_files(fname, pdb2go, go2info, pdb2seq):
     np.random.seed(1234)
     np.random.shuffle(protein_list)
     print ("Total number of annot nrPDB=%d" % (len(protein_list)))
+    #print(f"Sample protein chain : {protein_list[0]}")
 
     # select test set based in 30% sequence identity
     test_list = set()
@@ -229,7 +214,7 @@ def write_output_files(fname, pdb2go, go2info, pdb2seq):
     protein_list = list(set(protein_list).difference(test_list))
     np.random.shuffle(protein_list)
 
-    idx = int(0.9*len(protein_list))
+    idx = int(0.8*len(protein_list))
     write_prot_list(test_list, fname + '_test.txt')
     write_prot_list(protein_list[:idx], fname + '_train.txt')
     write_prot_list(protein_list[idx:], fname + '_valid.txt')
@@ -238,20 +223,18 @@ def write_output_files(fname, pdb2go, go2info, pdb2seq):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-sifts', type=str, default='./data/pdb_chain_go.tsv.gz', help="SIFTS annotation files.")
-    parser.add_argument('-bc', type=str, default='./data/clusters-by-entity-95.txt', help="Blastclust of PDB chains.")
-    parser.add_argument('-seqres', type=str, default='./data/pdb_seqres.txt.gz', help="PDB chain seqres fasta.")
-    parser.add_argument('-obo', type=str, default='./data/goslim_plant.obo', help="Gene Ontology hierarchy.")
-    parser.add_argument('-out', type=str, default='./data/nrPDB-GO', help="Output filename prefix.")
+    parser.add_argument('-sifts', type=str, default='preprocessing/data/pdb_chain_go.tsv.gz', help="SIFTS annotation files.")
+    parser.add_argument('-bc', type=str, default='preprocessing/data/clusters-by-entity-100.txt', help="Blastclust of PDB chains.")
+    parser.add_argument('-seqres', type=str, default='preprocessing/data/pdb_seqres.txt.gz', help="PDB chain seqres fasta.")
+    parser.add_argument('-obo', type=str, default='preprocessing/data/go-basic.obo', help="Gene Ontology hierarchy.")
+    parser.add_argument('-out', type=str, default='preprocessing/data/nrPDB-GO', help="Output filename prefix.")
+    parser.add_argument('-plant_chains', type=str, default='preprocessing/data/plant_chains.csv')
+    parser.add_argument('-plant_ids', type=str, default='preprocessing/data/plant_ids.txt')
     args = parser.parse_args()
 
-    annoted_chains = load_pdbs(args.sifts)
-    pdb2clust = load_clusters(args.bc)
+
+    annotated_plant_chains_2 = load_plant_ids(args.plant_ids)
     pdb2seq = read_fasta(args.seqres)
-    nr_chains = nr_set(annoted_chains, pdb2clust)
-    print ("### nrPDB annotated chains=", len(nr_chains))
-
     go_graph = load_go_graph(args.obo)
-    pdb2go, go2info = read_sifts(args.sifts, nr_chains, go_graph)
-
-    write_output_files(args.out, pdb2go, go2info, pdb2seq)
+    pdb2go, go2info = read_sifts(args.sifts, annotated_plant_chains_2, go_graph)
+    write_output_files(args.out, pdb2go, go2info, pdb2seq) 
