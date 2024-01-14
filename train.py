@@ -2,68 +2,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torch_geometric.nn import GCNConv, global_mean_pool
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 from sklearn.metrics import accuracy_score
 from tqdm import tqdm
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split 
 import matplotlib.pyplot as plt
-from preprocessing.pydataset3 import PDB_Dataset  # Make sure to import your dataset module
-from torch.nn.functional import binary_cross_entropy_with_logits as BCEWithLogitsLoss
-
-class CustomMultilabelLoss(nn.Module):
-    def __init__(self):
-        super(CustomMultilabelLoss, self).__init__()
-
-    def forward(self, predictions, targets):
-        # Assuming predictions and targets are dictionaries
-        loss = {}
-
-        for ontology, prediction in predictions.items():
-            # Assuming BCELoss for each ontology
-            # Ensure both prediction and target are 1D tensors
-            bce_loss = nn.BCEWithLogitsLoss()(prediction.view(-1), targets[ontology].float().view(-1))
-            loss[ontology] = bce_loss
-
-        # Calculate 'total' loss
-        loss['total'] = sum(loss.values())
-
-        return loss
-
-class GCNMultiLabelClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, output_sizes_dict):
-        super(GCNMultiLabelClassifier, self).__init__()
-        
-        # Initializing GCN layers
-        self.conv1 = GCNConv(input_size, hidden_size)
-        self.conv2 = GCNConv(hidden_size, hidden_size)
-
-        # Output layers for each ontology, ModuleDict holds submodules in a dictionary.
-        # Here the submodules are the Linear output layers for each ontology
-        self.output_layers = nn.ModuleDict({
-            ontology: nn.Linear(hidden_size, output_size) for ontology, output_size in output_sizes_dict.items()
-        })
-
-        # Dropout layers
-        self.dropout_input = nn.Dropout(0.8)
-        self.dropout_hidden = nn.Dropout(0.3)
-
-    def forward(self, x, edge_index, batch):
-        # First GCN layer
-        x = torch.relu(self.conv1(x, edge_index))
-        x = self.dropout_input(x)
-
-        # Second GCN layer
-        x = torch.relu(self.conv2(x, edge_index))
-        x = self.dropout_hidden(x)
-
-        # Aggregation step
-        x = global_mean_pool(x, batch)  # or global_add_pool or global_max_pool
-
-        # Output layers for each ontology
-        outputs = {ontology: self.output_layers[ontology](x) for ontology in self.output_layers.keys()}
-        return outputs
-
+from preprocessing.pydataset3 import PDB_Dataset
+from gcn-multilabel-classifier import GCN
+from config import CustomMultilabelLoss
+    
 # Set up the dataset
 root = 'preprocessing/data/annot_pdb_chains_npz'
 annot_file = 'preprocessing/data/nrPDB-GO_annot.tsv'
@@ -73,10 +20,11 @@ num_shards = 20
 dataset = PDB_Dataset(root, annot_file, num_shards=num_shards)
 torch.manual_seed(12345)
 
-# Split dataset into train, validation, and test sets
-train_dataset, temp_dataset = train_test_split(dataset, test_size=0.2, random_state=12345)
-val_dataset, test_dataset = train_test_split(temp_dataset, test_size=0.5, random_state=12345)
+#splitting the dataset into train, test and validation sets
+train_dataset, test_dataset = train_test_split(dataset, test_size=0.4, random_state=12345)
+val_dataset, test_dataset = train_test_split(test_dataset, test_size=0.5, random_state=54321)
 
+#creating dataloader objects out of the train, test and validation datasets
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
@@ -89,18 +37,33 @@ output_sizes_dict = {
     'biological_process': len(dataset[0].y['biological_process']),
     'cellular_component': len(dataset[0].y['cellular_component'])
 }
+print(f"debug: the output_sizes_dict['molecular_function]: {output_sizes_dict['molecular_function']}") #981 : doesn't contain batch size 
 
-model = GCNMultiLabelClassifier(input_size, hidden_size, output_sizes_dict)
+#save the best model weights
+best_val_accuracy = {ontology: 0.0 for ontology in output_sizes_dict.keys()}
+best_model_weights = {ontology: None for ontology in output_sizes_dict.keys()}
+
+
+#Initiliazing the model
+model = GCN(input_size, hidden_size, output_sizes_dict)
+
+#set the device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
 
+# Loss calculation
 criterion = CustomMultilabelLoss() 
-optimizer = optim.Adam(model.parameters(), lr=0.0005)
+
+# Learning rate and scheduler
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
 # Training loop
-num_epochs = 50
+num_epochs = 150
 train_losses = []
+
+#accuracies 
+train_accuracies = {ontology: [] for ontology in output_sizes_dict.keys()}
 val_accuracies = {ontology: [] for ontology in output_sizes_dict.keys()}
 test_accuracies = {ontology: [] for ontology in output_sizes_dict.keys()}
 
@@ -108,19 +71,33 @@ for epoch in range(num_epochs):
     # Training
     model.train()
     total_train_loss = 0.0
+    all_train_preds = {ontology: [] for ontology in output_sizes_dict.keys()}
+    all_train_labels = {ontology: [] for ontology in output_sizes_dict.keys()}
 
     for data in tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs} - Training'):
         data = data.to(device)
         optimizer.zero_grad()
         outputs = model(data.x, data.edge_index, data.batch)
+        #print(f"debug: outputs['molecular_function]: {outputs['molecular_function'].shape}") #outputs['molecular_function]: torch.Size([64, 981])
         targets = {ontology: data.y[ontology] for ontology in output_sizes_dict.keys()}
-        loss = criterion(outputs, targets)
+        #print(f"debug: targets['molecular_function]: {targets['molecular_function'].shape}") #debug: targets['molecular_function]: torch.Size([62784])
+        loss = criterion(outputs, targets) #the outputs[ontology] size is flattened inside the custom loss function here
         loss['total'].backward()
         optimizer.step()
         total_train_loss += loss['total'].item()
 
-    avg_train_loss = total_train_loss / len(train_loader)
+        # Calculate training accuracy
+        for ontology in output_sizes_dict.keys():
+            all_train_preds[ontology].extend(torch.sigmoid(outputs[ontology].view(-1)).cpu())
+            all_train_labels[ontology].extend(data.y[ontology].cpu())
+
+    avg_train_loss = total_train_loss / len(train_loader) #/number of batches
     train_losses.append(avg_train_loss)
+
+    for ontology in output_sizes_dict.keys():
+        train_accuracy = accuracy_score(torch.vstack(all_train_labels[ontology]),
+                                        (torch.vstack(all_train_preds[ontology]) > 0.5).int())
+        train_accuracies[ontology].append(train_accuracy.item())
 
     # Validation
     model.eval()
@@ -140,6 +117,11 @@ for epoch in range(num_epochs):
         val_accuracy = accuracy_score(torch.vstack(all_val_labels[ontology]),
                                        (torch.vstack(all_val_preds[ontology]) > 0.5).int())
         val_accuracies[ontology].append(val_accuracy.item())
+
+
+        if val_accuracy > best_val_accuracy[ontology]:
+            best_val_accuracy[ontology] = val_accuracy
+            best_model_weights[ontology] = model.state_dict()
 
     # Testing
     model.eval()
@@ -162,28 +144,36 @@ for epoch in range(num_epochs):
 
     print(f'Epoch {epoch + 1}/{num_epochs} - '
           f'Training Loss: {avg_train_loss:.4f}, '
+          f'Training Accuracy: {train_accuracy:.4f}, '
           f'Validation Accuracy: {val_accuracy:.4f}, '
           f'Test Accuracy: {test_accuracy:.4f}')
 
-def plot_metrics(train_losses, val_accuracies, test_accuracies, epochs):
-    plt.figure(figsize=(12, 5))
+def plot_metrics(train_losses, train_accuracies, val_accuracies, test_accuracies, epochs):
+    plt.figure(figsize=(15, 5))
 
     # Plotting Training Loss
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, 3, 1)
     plt.plot(range(1, epochs + 1), train_losses, label='Training Loss', marker='o')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training Loss over Epochs')
     plt.legend()
 
-    # Plotting Validation Accuracy
-    plt.subplot(1, 2, 2)
+    # Plotting Training Accuracy
+    plt.subplot(1, 3, 2)
+    for ontology, train_accuracy in train_accuracies.items():
+        plt.plot(range(1, epochs + 1), train_accuracy, label=f'Training {ontology} Accuracy', marker='o')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training Accuracies over Epochs')
+    plt.legend()
+
+    # Plotting Validation and Test Accuracies
+    plt.subplot(1, 3, 3)
     for ontology, val_accuracy in val_accuracies.items():
         plt.plot(range(1, epochs + 1), val_accuracy, label=f'Validation {ontology} Accuracy', marker='o')
-
     for ontology, test_accuracy in test_accuracies.items():
         plt.plot(range(1, epochs + 1), test_accuracy, label=f'Test {ontology} Accuracy', marker='o')
-
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
     plt.title('Validation and Test Accuracies over Epochs')
@@ -192,5 +182,12 @@ def plot_metrics(train_losses, val_accuracies, test_accuracies, epochs):
     plt.tight_layout()
     plt.show()
 
+# Load the best model weights
+for ontology in output_sizes_dict.keys():
+    model.load_state_dict(best_model_weights[ontology])
+    torch.save(model.state_dict(), f'best_model_weights_{ontology}.pth')
+
 # Usage:
-plot_metrics(train_losses, val_accuracies, test_accuracies, num_epochs)
+plot_metrics(train_losses, train_accuracies, val_accuracies, test_accuracies, num_epochs)
+
+
