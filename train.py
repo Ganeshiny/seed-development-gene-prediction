@@ -8,7 +8,7 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split 
 import matplotlib.pyplot as plt
 from preprocessing.pydataset3 import PDB_Dataset
-from GCNMultiLabelClassifier import GCN
+from gcn-multilabel-classifier import GCN
 from config import CustomMultilabelLoss
     
 # Set up the dataset
