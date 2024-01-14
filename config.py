@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 from preprocessing.pydataset3 import PDB_Dataset  # Make sure to import your dataset module
 from torch.nn.functional import binary_cross_entropy_with_logits as BCEWithLogitsLoss
-from GCNMultiLabelClassifier import GCN
+from gcn-multilabel-classifier import GCN
 
 
 '''
